@@ -10,13 +10,22 @@ import os
 import threading
 from cryptography.fernet import Fernet
 import traceback
-
+import tkinter.filedialog as fd
 # Hard-coded Fernet key
 key = "your key"  # Replace with your generated key
 fernet = Fernet(key)
 
 TEMP_DIR = os.path.join(os.path.expanduser("~"), "Documents", "AirDropped Files")
 os.makedirs(TEMP_DIR, exist_ok=True)
+
+def receive_key(conn):
+    received_key = conn.recv(1024)
+    if received_key == key:
+        conn.sendall(b"Correct Key")
+        return True
+    else:
+        conn.sendall(b"Incorrect Key")
+        return False
 
 def receive_file(conn, filename):
     file_data = b""
@@ -36,6 +45,19 @@ def receive_file(conn, filename):
         with open(file_path, "wb") as f:
             f.write(decrypted_data)
         print(f"Received and decrypted file: {filename}")
+        copy_yn = input("""Copy file to another folder?
+                        If yes, type Y.
+                        If no, type N.
+                        --> """).upper()
+        if copy_yn == "Y":
+            
+            new_dir = fd.askdirectory(initialdir=os.path.join(os.path.expanduser("~"), "Documents"))
+            saveto = os.path.join(new_dir, filename)
+            with open(saveto, "wb") as f:
+                f.write(decrypted_data)
+                print("Copied!")
+        else:
+            pass
     except Exception as e:
         print(f"Decryption error: {e}")
         traceback.print_exc()
@@ -43,7 +65,15 @@ def receive_file(conn, filename):
 def handle_client(conn, addr):
     print(f"Connected by {addr}")
     try:
-        # Use utf-8 encoding to handle filenames with special characters
+        # Receive the key from the client
+        if not receive_key(conn):
+            print(f"Key verification failed for {addr}. Closing connection.")
+            conn.close()
+            return
+        else:
+            print("Ready to receive files.")
+
+        # Key verification successful, receive the filename
         filename_data = b""
         while True:
             data = conn.recv(1024)
