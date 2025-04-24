@@ -5,109 +5,137 @@ Instructions:
 Replace "your key" below with the same key used in your sender. Share the updated "sender_base.py" and "server_base.py" to people you want to allow to send/recieve files from.
 
 """
-import socket
 import os
 import threading
+import socket
 from cryptography.fernet import Fernet
-import traceback
-import tkinter.filedialog as fd
+import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext
+from twisted.internet import reactor, protocol, endpoints
+from zeroconf import ServiceInfo, Zeroconf
+
 # Hard-coded Fernet key
-key = "your key"  # Replace with your generated key
+key = b'your key'  # Replace with your generated key
 fernet = Fernet(key)
 
 TEMP_DIR = os.path.join(os.path.expanduser("~"), "Documents", "AirDropped Files")
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-def receive_key(conn):
-    received_key = conn.recv(1024)
-    if received_key == key:
-        conn.sendall(b"Correct Key")
-        return True
-    else:
-        conn.sendall(b"Incorrect Key")
-        return False
+class FileReceiver(protocol.Protocol):
+    def __init__(self, factory):
+        self.factory = factory
+        self.receiving_file = False
+        self.filename = ""
+        self.file_data = b""
 
-def receive_file(conn, filename):
-    file_data = b""
-    while True:
-        data = conn.recv(1024)
-        if not data:
-            break
-        file_data += data
+    def dataReceived(self, data):
+        if not self.receiving_file:
+            if data.startswith(b"FILE "):
+                self.filename = data[5:].decode().strip()
+                self.factory.app.status_text.insert(tk.END, f"Receiving file: {self.filename}\n")
+                self.receiving_file = True
+        else:
+            self.file_data += data
+            # Assuming the file is sent in one chunk
+            if len(self.file_data) > 0:
+                self.process_received_file()
+                self.receiving_file = False
+                self.filename = ""
+                self.file_data = b""
 
-    if not file_data:
-        print(f"No data received for file: {filename}")
-        return
-
-    try:
-        decrypted_data = fernet.decrypt(file_data)
-        file_path = os.path.join(TEMP_DIR, filename)
-        with open(file_path, "wb") as f:
-            f.write(decrypted_data)
-        print(f"Received and decrypted file: {filename}")
-        copy_yn = input("""Copy file to another folder?
-                        If yes, type Y.
-                        If no, type N.
-                        --> """).upper()
-        if copy_yn == "Y":
-            
-            new_dir = fd.askdirectory(initialdir=os.path.join(os.path.expanduser("~"), "Documents"))
-            saveto = os.path.join(new_dir, filename)
-            with open(saveto, "wb") as f:
+    def process_received_file(self):
+        try:
+            decrypted_data = fernet.decrypt(self.file_data)
+            file_path = os.path.join(TEMP_DIR, self.filename)
+            with open(file_path, "wb") as f:
                 f.write(decrypted_data)
-                print("Copied!")
-        else:
-            pass
-    except Exception as e:
-        print(f"Decryption error: {e}")
-        traceback.print_exc()
+            self.factory.app.status_text.insert(tk.END, f"Received and decrypted file: {self.filename}\n")
+            copy_yn = messagebox.askyesno("Copy File", "Copy file to another folder?")
+            if copy_yn:
+                new_dir = filedialog.askdirectory(initialdir=os.path.join(os.path.expanduser("~"), "Documents"))
+                if new_dir:
+                    saveto = os.path.join(new_dir, self.filename)
+                    with open(saveto, "wb") as f:
+                        f.write(decrypted_data)
+                    self.factory.app.status_text.insert(tk.END, "Copied!\n")
+            else:
+                self.factory.app.status_text.insert(tk.END, "File saved in AirDropped Files folder.\n")
+        except Exception as e:
+            self.factory.app.status_text.insert(tk.END, f"Decryption error: {e}\n")
 
-def handle_client(conn, addr):
-    print(f"Connected by {addr}")
-    try:
-        # Receive the key from the client
-        if not receive_key(conn):
-            print(f"Key verification failed for {addr}. Closing connection.")
-            conn.close()
-            return
-        else:
-            print("Ready to receive files.")
+class FileReceiverFactory(protocol.Factory):
+    def __init__(self, app):
+        self.app = app
 
-        # Key verification successful, receive the filename
-        filename_data = b""
-        while True:
-            data = conn.recv(1024)
-            if not data:
-                print(f"Received no data from {addr}. Closing connection.")
-                conn.close()
-                return
-            filename_data += data
-            if b'\n' in filename_data:  # Assuming filename is terminated by a newline character
-                filename = filename_data.decode('utf-8').strip()
-                break
-        
-        if not filename:
-            print(f"Received empty filename from {addr}. Closing connection.")
-            conn.close()
-            return
-        print(f"Receiving file: {filename}")
-        receive_file(conn, filename)
-    except Exception as e:
-        print(f"Error handling client {addr}: {e}")
-        traceback.print_exc()  # Print the stack trace for more details
-    finally:
-        conn.close()
+    def buildProtocol(self, addr):
+        return FileReceiver(self)
 
-def main():
-    host = '0.0.0.0'  # Listen on all interfaces
-    port = 6000  # Port
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind((host, port))  # Bind host and port
-        s.listen()  # Begin listening to socket for transmissions
-        print(f"Listening on {host}:{port}")  # Confirm reading
-        while True:
-            conn, addr = s.accept()
-            threading.Thread(target=handle_client, args=(conn, addr)).start()
+class SignalingClientProtocol(protocol.Protocol):
+    def __init__(self, factory):
+        self.factory = factory
+
+    def connectionMade(self):
+        self.factory.app.status_text.insert(tk.END, "Connected to signaling server\n")
+        self.factory.signaling_connected = True
+        self.transport.write(f"RECEIVER {self.factory.ip}:{self.factory.port}\n".encode())
+
+class SignalingClientFactory(protocol.Factory):
+    def __init__(self, app, ip, port):
+        self.app = app
+        self.signaling_connected = False
+        self.ip = ip
+        self.port = port
+
+    def buildProtocol(self, addr):
+        return SignalingClientProtocol(self)
+
+class ReceiverApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("AirDrop Receiver")
+
+        self.status_text = scrolledtext.ScrolledText(root, width=60, height=15, wrap=tk.WORD)
+        self.status_text.pack(pady=20)
+
+        # Zeroconf for advertising
+        self.zeroconf = Zeroconf()
+        ip_address = socket.gethostbyname(socket.gethostname())
+        self.info = ServiceInfo(
+            "_airdrop._tcp.local.",
+            "AirDropReceiver._airdrop._tcp.local.",
+            addresses=[socket.inet_aton(ip_address)],
+            port=6001,
+            properties={},
+            server=f"{socket.gethostname()}.local."
+        )
+        self.zeroconf.register_service(self.info)
+
+        # Signaling server connection
+        self.ip = ip_address
+        self.port = 6001
+        self.signaling_client = SignalingClientFactory(self, self.ip, self.port)
+        endpoint = endpoints.TCP4ClientEndpoint(reactor, "127.0.0.1", 6000)
+        endpoint.connect(self.signaling_client).addErrback(self.handle_error)
+
+        # Twisted server for receiving files
+        endpoint = endpoints.TCP4ServerEndpoint(reactor, 6001)
+        endpoint.listen(FileReceiverFactory(self))
+        self.status_text.insert(tk.END, f"Listening on {self.ip}:{self.port}\n")
+
+    def handle_error(self, error):
+        self.status_text.insert(tk.END, f"Connection error: {error}\n")
+
+    def __del__(self):
+        self.zeroconf.close()
 
 if __name__ == "__main__":
-    main()
+    root = tk.Tk()
+    app = ReceiverApp(root)
+
+    def start_reactor():
+        reactor.run(installSignalHandlers=False)
+
+    reactor_thread = threading.Thread(target=start_reactor)
+    reactor_thread.start()
+
+    root.mainloop()
