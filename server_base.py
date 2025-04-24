@@ -15,7 +15,7 @@ from twisted.internet import reactor, protocol, endpoints
 from zeroconf import ServiceInfo, Zeroconf
 
 # Hard-coded Fernet key
-key = b'your key'  # Replace with your generated key
+key = your key  # Replace with your generated key
 fernet = Fernet(key)
 
 TEMP_DIR = os.path.join(os.path.expanduser("~"), "Documents", "AirDropped Files")
