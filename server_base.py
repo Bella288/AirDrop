@@ -15,7 +15,7 @@ from twisted.internet import reactor, protocol, endpoints
 from zeroconf import ServiceInfo, Zeroconf
 
 # Hard-coded Fernet key
-key = your key  # Replace with your generated key
+key = your key # Replace with your generated key
 fernet = Fernet(key)
 
 TEMP_DIR = os.path.join(os.path.expanduser("~"), "Documents", "AirDropped Files")
@@ -114,13 +114,18 @@ class ReceiverApp:
         self.ip = ip_address
         self.port = 6001
         self.signaling_client = SignalingClientFactory(self, self.ip, self.port)
-        endpoint = endpoints.TCP4ClientEndpoint(reactor, "127.0.0.1", 6000)
-        endpoint.connect(self.signaling_client).addErrback(self.handle_error)
+        endpoint = endpoints.TCP4ClientEndpoint(reactor, "127.0.0.1", 0)  # Use port 0 to let the system choose an available port
+        d = endpoint.connect(self.signaling_client)
+        d.addCallback(self.handle_signaling_connection)
+        d.addErrback(self.handle_error)
 
         # Twisted server for receiving files
         endpoint = endpoints.TCP4ServerEndpoint(reactor, 6001)
         endpoint.listen(FileReceiverFactory(self))
         self.status_text.insert(tk.END, f"Listening on {self.ip}:{self.port}\n")
+
+    def handle_signaling_connection(self, protocol):
+        self.status_text.insert(tk.END, "Connected to signaling server\n")
 
     def handle_error(self, error):
         self.status_text.insert(tk.END, f"Connection error: {error}\n")
